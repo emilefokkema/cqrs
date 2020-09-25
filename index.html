@@ -3,8 +3,16 @@
 	<script type="text/javascript" src="index.js"></script>
 	<script>
 	(async function(){
-		var state = await CQRS.create('sampleState.js');
-		console.log(state);
+		var state = await CQRS.create('sampleState.js', 2);
+		
+		state.setStep(2);
+
+		var cancellationToken = new CQRS.CancellationToken();
+		
+		state.getStep(2, cancellationToken);
+		cancellationToken.cancel();
+		var result = await state.getStep(3);
+		console.log(`got result `, result);
 	})()
 	</script>
 </body>
