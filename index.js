@@ -5,6 +5,7 @@ var CQRS = (function(){
 		return worker;
 	}
 	var requestId = 0;
+	var workerId = 0;
 	class CancellationToken{
 		constructor(){
 			this.cancelled = false;
@@ -44,30 +45,97 @@ var CQRS = (function(){
 	}
 	class WorkerWrapper{
 		constructor(url){
+			this.workerId = workerId++;
 			this.url = url;
 			this.worker = undefined;
 			this.workerInitialized = false;
 			this.busy = false;
+			this.currentRequest = undefined;
 		}
-		async whenFree(){
-
+		async ensureWorkerInitialized(){
+			if(this.worker){
+				return;
+			}
+			var self = this;
+			this.worker = getWorkerThatExecutedFunction(function(workerId, url){
+				var commandHandlers = {}, queryHandlers = {};
+				onCommand = function(commandName, handler){
+					commandHandlers[commandName] = handler;
+				};
+				onQuery = function(queryName, handler){
+					queryHandlers[queryName] = handler;
+				};
+				importScripts(url);
+				onmessage = function(e){
+					var data = e.data;
+					if(data.commandName){
+						var handler = commandHandlers[data.commandName];
+						try{
+							var result = handler.apply(null, data.args);
+							if(result instanceof Promise){
+								result.then((r) => postMessage({result: r})).catch((e) => postMessage({error: e}))
+							}else{
+								postMessage({result: result})
+							}
+						}catch(e){
+							postMessage({error:e});
+						}
+					}
+				};
+			}, this.workerId, this.url);
+			this.worker.onmessage = function(e){
+				var data = e.data;
+				if(data.error){
+					self.currentRequest.reject(data.error);
+				}else{
+					self.currentRequest.resolve(data.result);
+				}
+			};
 		}
-		initializeWorker(){
-
+		async executeCommand(command){
+			console.log(`worker ${this.workerId} going to execute command '${command.methodName}', args `, command.args);
+			this.busy = true;
+			this.currentRequest = command;
+			this.ensureWorkerInitialized();
+			this.worker.postMessage({commandName: command.methodName, args: command.args});
+			try{
+				await command.promise;
+			}finally{
+				this.busy = false;
+			}
 		}
 	}
 	class WorkerPool{
 		constructor(url, number){
 			this.number = number;
 			this.workers = [];
-			this.commands = [];
 			this.queries = [];
 			this.url = url;
+			this.executingCommand = false;
 		}
 		async executeNext(){
-			if(this.commands.length > 0){
-				var commandToExecute = this.commands.splice(0, 1)[0];
-				
+			if(this.executingCommand){
+				return;
+			}
+			this.ensureOneWorker();
+			if(this.queries.length > 0){
+				console.log(`going to execute queries`)
+			}
+		}
+
+		ensureOneWorker(){
+			if(this.workers.length === 0){
+				this.workers.push(new WorkerWrapper(this.url));
+			}
+		}
+		getAvailableWorkers(number){
+			var result = [];
+			while(result.length < number){
+				var availableWorker = this.getAvailableWorker();
+				if(!availableWorker){
+					return result;
+				}
+				result.push(availableWorker);
 			}
 		}
 		getAvailableWorker(){
@@ -82,25 +150,12 @@ var CQRS = (function(){
 				return newWorker;
 			}
 		}
-		removeCommand(request){
-			var index = this.commands.indexOf(request);
-			if(index > -1){
-				this.commands.splice(index, 1);
-				console.log(`removed command with id ${request.requestId}`);
-			}
-		}
 		removeQuery(request){
 			var index = this.queries.indexOf(request);
 			if(index > -1){
 				this.queries.splice(index, 1);
 				console.log(`removed query with id ${request.requestId}`);
 			}
-		}
-		dequeueCommand(){
-			if(this.commands.length === 0){
-				return;
-			}
-			return this.commands.splice(0, 1)[0];
 		}
 		enqueueCommand(commandName, args){
 			var command = new WorkerRequest(commandName, args);
@@ -123,14 +178,23 @@ var CQRS = (function(){
 			this.executeNext();
 			return query.promise;
 		}
-		executeCommand(commandName, args){
-			if(this.queries.length > 0 || this.commands.length > 0){
+		async executeCommand(commandName, args){
+			if(this.workers.some(w => w.busy)){
 				throw 'Cannot execute command when there are commands or queries pending'
 			}
+			this.executingCommand = true;
+			// if(this.queries.length > 0 || this.commands.length > 0){
+			// 	throw 'Cannot execute command when there are commands or queries pending'
+			// }
 			//console.log(`worker pool going to execute command '${commandName}' with args `, args);
-			var command = this.enqueueCommand(commandName, args);
+			
+			this.ensureOneWorker();
+			try{
+				await Promise.all(this.workers.map(w => w.executeCommand(new WorkerRequest(commandName, args))));
+			}finally{
+				this.executingCommand = false;
+			}
 			this.executeNext();
-			return command.promise;
 		}
 	}
 
