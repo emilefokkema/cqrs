@@ -24,6 +24,7 @@ var CQRS = (function(){
 		}, url);
 		worker.onmessage = function(e){
 			resolve(e.data);
+			worker.terminate();
 		};
 		worker.onerror = function(e){
 			reject(e.error);
@@ -31,11 +32,24 @@ var CQRS = (function(){
 		worker.postMessage(undefined);
 		return promise;
 	}
+	function getQueryExecuter(queryName){
+		return function(){};
+	}
+	function getCommandExecuter(commandName){
+		return function(){};
+	}
 	var CQRS = {
 		async create(url){
 			url = new URL(url, location.href).toString();
 			var definition = await getStateDefinition(url);
-			console.log(`got definition:`, definition);
+			var result = {};
+			for(var queryName of definition.queryNames){
+				result[queryName] = getQueryExecuter(queryName);
+			}
+			for(var commandName of definition.commandNames){
+				result[commandName] = getCommandExecuter(commandName);
+			}
+			return result;
 		}
 	};
 
