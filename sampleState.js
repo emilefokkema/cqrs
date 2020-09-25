@@ -1,15 +1,14 @@
 var step;
 
 onCommand('setStep', s => {
-	console.log(`sample state going to set step `, s);
+	console.log(`sample state going to set step from ${step} to`, s);
 	return new Promise((res, rej) => {setTimeout(() => {
-		step = s;
+		
 		
 		if(s === 2){
-			console.log(`sample state cannot set step to `, s);
-			rej('a')
+			rej(`state cannot be set to 2`)
 		}else{
-			console.log(`sample state finished setting step`);
+			step = s;
 			res();
 		}
 		
@@ -17,5 +16,12 @@ onCommand('setStep', s => {
 });
 
 onQuery('getStep', index => {
-	return new Promise((res) => {setTimeout(function(){res(index * step);}, 1000)})
+	return new Promise((res) => {setTimeout(function(){res(index * step);}, Math.floor(100 + 500 * Math.random()))})
 });
+
+onExportState(() => step);
+
+onImportState(s => {
+	console.log(`setting step from ${step} to `, s);
+	step = s;
+})

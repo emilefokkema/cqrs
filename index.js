@@ -58,7 +58,13 @@ var CQRS = (function(){
 			}
 			var self = this;
 			this.worker = getWorkerThatExecutedFunction(function(workerId, url){
-				var commandHandlers = {}, queryHandlers = {};
+				var exportStateHandler, importStateHandler, commandHandlers = {}, queryHandlers = {};
+				onImportState = function(handler){
+					importStateHandler = handler;
+				};
+				onExportState = function(handler){
+					exportStateHandler = handler;
+				};
 				onCommand = function(commandName, handler){
 					commandHandlers[commandName] = handler;
 				};
@@ -66,12 +72,10 @@ var CQRS = (function(){
 					queryHandlers[queryName] = handler;
 				};
 				importScripts(url);
-				onmessage = function(e){
-					var data = e.data;
-					if(data.commandName){
-						var handler = commandHandlers[data.commandName];
+				onmessage = (function(){
+					function handleResult(fn){
 						try{
-							var result = handler.apply(null, data.args);
+							var result = fn();
 							if(result instanceof Promise){
 								result.then((r) => postMessage({result: r})).catch((e) => postMessage({error: e}))
 							}else{
@@ -81,7 +85,22 @@ var CQRS = (function(){
 							postMessage({error:e});
 						}
 					}
-				};
+					return function(e){
+						var data = e.data;
+						if(data.commandName){
+							var handler = commandHandlers[data.commandName];
+							handleResult(() => handler.apply(null, data.args))
+						}else if(data.queryName){
+							console.log(`worker ${workerId} going to execute a query`);
+							var handler = queryHandlers[data.queryName];
+							handleResult(() => handler.apply(null, data.args));
+						}else if(data.exportState){
+							handleResult(() => exportStateHandler.apply(null, []));
+						}else if(data.importState){
+							handleResult(() => importStateHandler.apply(null, [data.state]));
+						}
+					};
+				})();
 			}, this.workerId, this.url);
 			this.worker.onmessage = function(e){
 				var data = e.data;
@@ -92,8 +111,43 @@ var CQRS = (function(){
 				}
 			};
 		}
+		async setState(state){
+			this.busy = true;
+			var request = new WorkerRequest('',[]);
+			this.currentRequest = request;
+			this.ensureWorkerInitialized();
+			this.worker.postMessage({importState: true, state: state});
+			try{
+				await request.promise;
+			}finally{
+				this.busy = false;
+			}
+		}
+		async getState(){
+			this.busy = true;
+			var request = new WorkerRequest('',[]);
+			this.currentRequest = request;
+			this.ensureWorkerInitialized();
+			this.worker.postMessage({exportState: true});
+			try{
+				return await request.promise;
+			}finally{
+				this.busy = false;
+			}
+		}
+		async executeQuery(query){
+			this.busy = true;
+			this.currentRequest = query;
+			this.ensureWorkerInitialized();
+			this.worker.postMessage({queryName: query.methodName, args: query.args});
+			try{
+				await query.promise;
+			}finally{
+				this.busy = false;
+			}
+		}
 		async executeCommand(command){
-			console.log(`worker ${this.workerId} going to execute command '${command.methodName}', args `, command.args);
+			//console.log(`worker ${this.workerId} going to execute command '${command.methodName}', args `, command.args);
 			this.busy = true;
 			this.currentRequest = command;
 			this.ensureWorkerInitialized();
@@ -118,36 +172,52 @@ var CQRS = (function(){
 				return;
 			}
 			this.ensureOneWorker();
-			if(this.queries.length > 0){
-				console.log(`going to execute queries`)
+			this.queries = this.queries.filter(q => !q.cancelled);
+			if(this.queries.length === 0){
+				return;
 			}
+			var availableWorkers = this.workers.filter(w => !w.busy).slice(0, this.queries.length);
+			if(availableWorkers.length === 0){
+				return;
+			}
+			if(availableWorkers.length < this.queries.length && this.workers.length < this.number){
+				var workerToCopy = availableWorkers.splice(0, 1)[0];
+				this.copyWorker(workerToCopy);
+			}
+			for(var availableWorker of availableWorkers){
+				this.dequeueAndExecuteQuery(availableWorker);
+			}
+			// var availableWorker = this.getAvailableWorker();
+			// while(!!availableWorker && this.queries.length > 0){
+			// 	this.dequeueAndExecuteQuery(availableWorker);
+			// 	availableWorker = this.getAvailableWorker();
+			// }
 		}
-
+		async copyWorker(worker){
+			console.log(`going to copy a worker`);
+			var state = await worker.getState();
+			//console.log(`got state from worker to copy: `, state);
+			var newWorker = new WorkerWrapper(this.url);
+			await newWorker.setState(state);
+			//console.log(`set state for new worker`);
+			this.workers.push(newWorker);
+			this.executeNext();
+		}
+		async dequeueAndExecuteQuery(worker){
+			//console.log(`going to execute a query`);
+			await worker.executeQuery(this.queries.splice(0, 1)[0]);
+			this.executeNext();
+		}
 		ensureOneWorker(){
 			if(this.workers.length === 0){
 				this.workers.push(new WorkerWrapper(this.url));
 			}
 		}
 		getAvailableWorkers(number){
-			var result = [];
-			while(result.length < number){
-				var availableWorker = this.getAvailableWorker();
-				if(!availableWorker){
-					return result;
-				}
-				result.push(availableWorker);
-			}
-		}
-		getAvailableWorker(){
 			for(var i = 0; i < this.workers.length; i++){
 				if(!this.workers[i].busy){
 					return this.workers[i];
 				}
-			}
-			if(this.workers.length < this.number){
-				var newWorker = new WorkerWrapper(this.url);
-				this.workers.push(newWorker);
-				return newWorker;
 			}
 		}
 		removeQuery(request){
@@ -169,7 +239,7 @@ var CQRS = (function(){
 				cancellationToken.onCancelled(() => this.removeQuery(query))
 			}
 			this.queries.push(query);
-			console.log(`enqueued query with id ${query.requestId}`);
+			//console.log(`enqueued query with id ${query.requestId}`);
 			return query;
 		}
 		executeQuery(queryName, args, cancellationToken){
@@ -202,6 +272,8 @@ var CQRS = (function(){
 		var resolve, reject, promise = new Promise(function(res, rej){resolve = res;reject = rej;});
 		var worker = getWorkerThatExecutedFunction(function(url){
 			var queryNames = [], commandNames = [];
+			onImportState = function(){};
+			onExportState = function(){};
 			onCommand = function(commandName){
 				commandNames.push(commandName);
 			};

@@ -5,14 +5,18 @@
 	(async function(){
 		var state = await CQRS.create('sampleState.js', 2);
 		
-		state.setStep(2).catch(() => state.setStep(4));
+		state.setStep(2).catch((e) => {console.log(`didn't work (${e}). setting step to 4`); state.setStep(4)});
 		//state.setStep(4);
 
 		var cancellationToken = new CQRS.CancellationToken();
 		
 		state.getStep(2, cancellationToken);
 		cancellationToken.cancel();
-		console.log(`got result `, await Promise.all([state.getStep(3), state.getStep(4), state.getStep(5)]));
+		var queries = [];
+		for(var i = 0; i < 10; i++){
+			queries.push(state.getStep(i))
+		}
+		console.log(`got result `, await Promise.all(queries));
 	})()
 	</script>
 </body>
