@@ -1,0 +1,45 @@
+<html>
+<head>
+	<style type="text/css">
+		#canvas{
+			width:500px;
+			height:500px;
+		}
+
+	</style>
+</head>
+<body>
+	<canvas id="canvas"/>
+	<script type="text/javascript" src="index.js"></script>
+	<script>
+	(async function(){
+		var canvas = document.getElementById("canvas");
+		var width = 500, height = 500;
+		canvas.width = width;
+		canvas.height = height;
+		var ctx = canvas.getContext("2d");
+		var state = await CQRS.create('canvasState.js', 2);
+		var drawTile = async function(left, top, tileSize){
+
+		};
+		var drawWithTileSize = async function(tileSize){
+			var nCols = Math.ceil(width / tileSize);
+			var nRows = Math.ceil(height / tileSize);
+			var tileDrawPromises = [];
+			for(var row = 0; row < nRows; row++){
+				for(var col = 0; col < nCols; col++){
+					tileDrawPromises.push(drawTile(col * tileSize, row * tileSize, tileSize));
+				}
+			}
+			await Promise.all(tileDrawPromises);
+		};
+		var draw = async function(centerX, centerY){
+			await state.setCenter(centerX, centerY);
+		};
+		
+		draw(width / 2, height / 2);
+		
+	})()
+	</script>
+</body>
+</html>
