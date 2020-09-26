@@ -2,8 +2,8 @@
 <head>
 	<style type="text/css">
 		#canvas{
-			width:500px;
-			height:500px;
+			width:800px;
+			height:800px;
 		}
 
 	</style>
@@ -14,31 +14,38 @@
 	<script>
 	(async function(){
 		var canvas = document.getElementById("canvas");
-		var width = 500, height = 500;
+		var width = 800, height = 800, tileSize = 30;
 		canvas.width = width;
 		canvas.height = height;
 		var ctx = canvas.getContext("2d");
-		var state = await CQRS.create('canvasState.js', 2);
-		var drawTile = async function(left, top, tileSize){
-
-		};
-		var drawWithTileSize = async function(tileSize){
-			var nCols = Math.ceil(width / tileSize);
-			var nRows = Math.ceil(height / tileSize);
-			var tileDrawPromises = [];
-			for(var row = 0; row < nRows; row++){
-				for(var col = 0; col < nCols; col++){
-					tileDrawPromises.push(drawTile(col * tileSize, row * tileSize, tileSize));
-				}
-			}
-			await Promise.all(tileDrawPromises);
+		var state = await CQRS.create('canvasState.js', 5);
+		await state.setWidthAndHeight(width, height);
+		await state.setTileSize(tileSize);
+		var cancellationToken;
+		var drawTile = async function(tile){
+			var pixelArrayBuffer = await state.getPixels(tile, cancellationToken);
+			var pixelArray = new Uint8ClampedArray(pixelArrayBuffer);
+			var imageData = new ImageData(pixelArray, tileSize);
+			ctx.putImageData(imageData, tile.col * tileSize, tile.row * tileSize);
 		};
 		var draw = async function(centerX, centerY){
+			if(cancellationToken){
+				cancellationToken.cancel();
+			}
+			cancellationToken = new CQRS.CancellationToken();
 			await state.setCenter(centerX, centerY);
+			var tiles = await state.getTiles(cancellationToken);
+			await Promise.all(tiles.map(drawTile))
 		};
-		
+
 		draw(width / 2, height / 2);
-		
+
+		canvas.addEventListener('click', e => {
+			var rect = canvas.getBoundingClientRect();
+			var x = e.clientX - rect.x;
+			var y = e.clientY - rect.y;
+			draw(x, y);
+		});
 	})()
 	</script>
 </body>

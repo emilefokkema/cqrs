@@ -31,24 +31,43 @@ var CQRS = (function(){
 	}
 	class WorkerRequest{
 		constructor(methodName, args, cancellationToken){
+			this.onCancelledHandlers = [];
 			this.requestId = requestId++;
 			this.cancellationToken = cancellationToken;
+			if(cancellationToken){
+				cancellationToken.onCancelled(() => {
+					for(var handler of this.onCancelledHandlers){
+						handler();
+					}
+				});
+			}
 			this.args = args;
 			this.methodName = methodName;
 			var self = this;
 			this.promise = new Promise(function(res, rej){
-				self.resolve = res;
-				self.reject = rej;
+				self.resolve = (r) => {
+					self.onCancelledHandlers = [];
+					res(r);
+				};
+				self.reject = (e) => {
+					self.onCancelledHandlers = [];
+					rej(e);
+				}
 			});
 		}
 		get cancelled(){return !!this.cancellationToken && this.cancellationToken.cancelled;}
+		onCancelled(handler){
+			if(!this.cancellationToken){
+				return;
+			}
+			this.onCancelledHandlers.push(handler);
+		}
 	}
 	class WorkerWrapper{
 		constructor(url){
 			this.workerId = workerId++;
 			this.url = url;
 			this.worker = undefined;
-			this.workerInitialized = false;
 			this.busy = false;
 			this.currentRequest = undefined;
 			console.log(`created worker ${this.workerId}`)
@@ -60,13 +79,20 @@ var CQRS = (function(){
 			var self = this;
 			this.worker = getWorkerThatExecutedFunction(function(workerId, url){
 				var exportStateHandler, importStateHandler, commandHandlers = {}, queryHandlers = {};
-				function handleResult(fn){
+				function postResult(result, transferable){
+					if(transferable){
+						postMessage({result}, [result])
+					}else{
+						postMessage({result})
+					}
+				}
+				function handleResult(fn, resultTransferable){
 					try{
 						var result = fn();
 						if(result instanceof Promise){
-							result.then((r) => postMessage({result: r})).catch((e) => postMessage({error: e}))
+							result.then((r) => postResult(r, resultTransferable)).catch((e) => postMessage({error: e}))
 						}else{
-							postMessage({result: result})
+							postResult(result, resultTransferable)
 						}
 					}catch(e){
 						postMessage({error:e});
@@ -81,8 +107,8 @@ var CQRS = (function(){
 				onCommand = function(commandName, handler){
 					commandHandlers[commandName] = handler;
 				};
-				onQuery = function(queryName, handler){
-					queryHandlers[queryName] = handler;
+				onQuery = function(queryName, handler, resultTransferable){
+					queryHandlers[queryName] = {handler, resultTransferable};
 				};
 				importScripts(url);
 				onmessage = function(e){
@@ -93,7 +119,7 @@ var CQRS = (function(){
 					}else if(data.queryName){
 						//console.log(`worker ${workerId} going to execute a query`);
 						var handler = queryHandlers[data.queryName];
-						handleResult(() => handler.apply(null, data.args));
+						handleResult(() => handler.handler.apply(null, data.args), handler.resultTransferable);
 					}else if(data.exportState){
 						handleResult(() => exportStateHandler.apply(null, []));
 					}else if(data.importState){
@@ -134,6 +160,12 @@ var CQRS = (function(){
 				this.busy = false;
 			}
 		}
+		terminate(){
+			if(this.worker){
+				this.worker.terminate();
+				this.worker = undefined;
+			}
+		}
 		async executeQuery(query){
 			this.busy = true;
 			this.currentRequest = query;
@@ -166,12 +198,13 @@ var CQRS = (function(){
 			this.url = url;
 			this.executingCommand = false;
 			this.copyingWorker = false;
+			this.currentState = undefined;
 		}
 		async executeNext(){
 			if(this.executingCommand){
 				return;
 			}
-			this.ensureOneWorker();
+			await this.ensureOneWorker();
 			this.queries = this.queries.filter(q => !q.cancelled);
 			if(this.queries.length === 0){
 				return;
@@ -181,16 +214,19 @@ var CQRS = (function(){
 				return;
 			}
 			if(availableWorkers.length < this.queries.length && this.workers.length < this.number && !this.copyingWorker){
-				var workerToCopy = availableWorkers.splice(0, 1)[0];
-				this.copyWorker(workerToCopy);
+				//var workerToCopy = availableWorkers.splice(0, 1)[0];
+				this.copyWorker();
 			}
 			for(var availableWorker of availableWorkers){
 				this.dequeueAndExecuteQuery(availableWorker);
 			}
 		}
-		async copyWorker(worker){
+		replaceWorker(worker){
+			console.log(`going to replace worker ${worker.workerId}`);
+		}
+		async copyWorker(){
 			this.copyingWorker = true;
-			var state = await worker.getState();
+			var state = this.currentState;//await worker.getState();
 			var newWorker = new WorkerWrapper(this.url);
 			var setStatePromise = newWorker.setState(state);
 			this.workers.push(newWorker);
@@ -200,13 +236,19 @@ var CQRS = (function(){
 		}
 		async dequeueAndExecuteQuery(worker){
 			//console.log(`going to execute a query`);
-			await worker.executeQuery(this.queries.splice(0, 1)[0]);
+			var query = this.queries.splice(0, 1)[0];
+			query.onCancelled(() => this.replaceWorker(worker));
+			await worker.executeQuery(query);
 			this.executeNext();
 		}
-		ensureOneWorker(){
-			if(this.workers.length === 0){
-				this.workers.push(new WorkerWrapper(this.url));
+		async ensureOneWorker(){
+			if(this.workers.length > 0){
+				return;
 			}
+			var worker = new WorkerWrapper(this.url);
+			this.currentState = await worker.getState();
+			console.log(`current state: `, this.currentState)
+			this.workers.push(worker);
 		}
 		getAvailableWorkers(number){
 			for(var i = 0; i < this.workers.length; i++){
@@ -219,14 +261,8 @@ var CQRS = (function(){
 			var index = this.queries.indexOf(request);
 			if(index > -1){
 				this.queries.splice(index, 1);
-				console.log(`removed query with id ${request.requestId}`);
+				//console.log(`removed query with id ${request.requestId}`);
 			}
-		}
-		enqueueCommand(commandName, args){
-			var command = new WorkerRequest(commandName, args);
-			this.commands.push(command);
-			console.log(`enqueued command with id ${command.requestId}`);
-			return command;
 		}
 		enqueueQuery(queryName, args, cancellationToken){
 			var query = new WorkerRequest(queryName, args, cancellationToken);
@@ -253,9 +289,11 @@ var CQRS = (function(){
 			// }
 			//console.log(`worker pool going to execute command '${commandName}' with args `, args);
 			
-			this.ensureOneWorker();
+			await this.ensureOneWorker();
 			try{
 				await Promise.all(this.workers.map(w => w.executeCommand(new WorkerRequest(commandName, args))));
+				this.currentState = await this.workers[0].getState();
+				console.log(`current state: `, this.currentState)
 			}finally{
 				this.executingCommand = false;
 			}
@@ -266,9 +304,13 @@ var CQRS = (function(){
 	function getStateDefinition(url){
 		var resolve, reject, promise = new Promise(function(res, rej){resolve = res;reject = rej;});
 		var worker = getWorkerThatExecutedFunction(function(url){
-			var queryNames = [], commandNames = [];
-			onImportState = function(){};
-			onExportState = function(){};
+			var queryNames = [], commandNames = [], importStateHandlerSet = false, exportStateHandlerSet = false;
+			onImportState = function(handler){
+				importStateHandlerSet = typeof handler === "function";
+			};
+			onExportState = function(handler){
+				exportStateHandlerSet = typeof handler === "function";
+			};
 			onCommand = function(commandName){
 				commandNames.push(commandName);
 			};
@@ -277,15 +319,24 @@ var CQRS = (function(){
 			};
 			importScripts(url);
 			onmessage = function(){
-				postMessage({
-					queryNames: queryNames,
-					commandNames: commandNames
-				});
+				if(!importStateHandlerSet || !exportStateHandlerSet){
+					postMessage({error: "Please provide methods to export and import the state"})
+				}else{
+					postMessage({
+						queryNames: queryNames,
+						commandNames: commandNames
+					});
+				}
 			};
 		}, url);
 		worker.onmessage = function(e){
 			worker.terminate();
-			resolve(e.data);
+			var data = e.data;
+			if(data.error){
+				reject(data.error);
+			}else{
+				resolve(data);
+			}
 		};
 		worker.onerror = function(e){
 			reject(e.error);
