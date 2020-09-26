@@ -1,4 +1,3 @@
-//console.log(`this:`, this)
 var step;
 
 onCommand('setStep', s => {
@@ -14,6 +13,11 @@ onCommand('setStep', s => {
 		}
 		
 	}, 1000)})
+});
+
+onQuery('getSteps', async function(indices){
+	var firstStep = await this.getStep(indices[0]);
+	return firstStep;
 });
 
 onQuery('getStep', index => {

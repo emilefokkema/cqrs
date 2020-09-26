@@ -59,7 +59,20 @@ var CQRS = (function(){
 			}
 			var self = this;
 			this.worker = getWorkerThatExecutedFunction(function(workerId, url){
-				var exportStateHandler, importStateHandler, commandHandlers = {}, queryHandlers = {};
+				var queryId = 0;
+				class Query{
+					constructor(queryName, args){
+						this.queryName = queryName;
+						this.args = args;
+						this.queryId = queryId++;
+						var self = this;
+						this.promise = new Promise((res, rej) => {
+							self.resolve = res;
+							self.reject = rej;
+						});
+					}
+				}
+				var exportStateHandler, importStateHandler, commandHandlers = {}, queryHandlers = {}, thisArg = {};
 				function handleResult(fn){
 					try{
 						var result = fn();
@@ -72,6 +85,13 @@ var CQRS = (function(){
 						postMessage({error:e});
 					}
 				}
+				function createQueryExecuter(queryName){
+					return function(...args){
+						console.log(`worker ${workerId} going to execute query '${queryName}', args = `, args);
+						var query = new Query(queryName, args);
+						return query.promise;
+					};
+				}
 				onImportState = function(handler){
 					importStateHandler = handler;
 				};
@@ -82,6 +102,7 @@ var CQRS = (function(){
 					commandHandlers[commandName] = handler;
 				};
 				onQuery = function(queryName, handler){
+					thisArg[queryName] = createQueryExecuter(queryName);
 					queryHandlers[queryName] = handler;
 				};
 				importScripts(url);
@@ -89,15 +110,15 @@ var CQRS = (function(){
 					var data = e.data;
 					if(data.commandName){
 						var handler = commandHandlers[data.commandName];
-						handleResult(() => handler.apply(null, data.args))
+						handleResult(() => handler.apply(thisArg, data.args))
 					}else if(data.queryName){
 						//console.log(`worker ${workerId} going to execute a query`);
 						var handler = queryHandlers[data.queryName];
-						handleResult(() => handler.apply(null, data.args));
+						handleResult(() => handler.apply(thisArg, data.args));
 					}else if(data.exportState){
-						handleResult(() => exportStateHandler.apply(null, []));
+						handleResult(() => exportStateHandler.apply(thisArg, []));
 					}else if(data.importState){
-						handleResult(() => importStateHandler.apply(null, [data.state]));
+						handleResult(() => importStateHandler.apply(thisArg, [data.state]));
 					}
 				};
 			}, this.workerId, this.url);
