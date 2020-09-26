@@ -1,3 +1,4 @@
+//console.log(`this:`, this)
 var step;
 
 onCommand('setStep', s => {
@@ -16,12 +17,21 @@ onCommand('setStep', s => {
 });
 
 onQuery('getStep', index => {
-	return new Promise((res) => {setTimeout(function(){res(index * step);}, Math.floor(100 + 500 * Math.random()))})
+	return new Promise((res) => {
+		var delay = Math.floor(20 + 40 * Math.random());
+		setTimeout(function(){
+			res({result: index * step, delay: delay});
+		}, delay)
+	})
 });
 
 onExportState(() => step);
 
 onImportState(s => {
-	console.log(`setting step from ${step} to `, s);
-	step = s;
+	return new Promise((res) => setTimeout(() => {
+		step = s;
+		console.log(`finished importing new state`)
+		res();
+	}, 20))
+	//step = s;
 })
