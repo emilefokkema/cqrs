@@ -51,6 +51,7 @@ var CQRS = (function(){
 			this.workerInitialized = false;
 			this.busy = false;
 			this.currentRequest = undefined;
+			console.log(`created worker ${this.workerId}`)
 		}
 		async ensureWorkerInitialized(){
 			if(this.worker){
@@ -59,6 +60,18 @@ var CQRS = (function(){
 			var self = this;
 			this.worker = getWorkerThatExecutedFunction(function(workerId, url){
 				var exportStateHandler, importStateHandler, commandHandlers = {}, queryHandlers = {};
+				function handleResult(fn){
+					try{
+						var result = fn();
+						if(result instanceof Promise){
+							result.then((r) => postMessage({result: r})).catch((e) => postMessage({error: e}))
+						}else{
+							postMessage({result: result})
+						}
+					}catch(e){
+						postMessage({error:e});
+					}
+				}
 				onImportState = function(handler){
 					importStateHandler = handler;
 				};
@@ -72,35 +85,21 @@ var CQRS = (function(){
 					queryHandlers[queryName] = handler;
 				};
 				importScripts(url);
-				onmessage = (function(){
-					function handleResult(fn){
-						try{
-							var result = fn();
-							if(result instanceof Promise){
-								result.then((r) => postMessage({result: r})).catch((e) => postMessage({error: e}))
-							}else{
-								postMessage({result: result})
-							}
-						}catch(e){
-							postMessage({error:e});
-						}
+				onmessage = function(e){
+					var data = e.data;
+					if(data.commandName){
+						var handler = commandHandlers[data.commandName];
+						handleResult(() => handler.apply(null, data.args))
+					}else if(data.queryName){
+						//console.log(`worker ${workerId} going to execute a query`);
+						var handler = queryHandlers[data.queryName];
+						handleResult(() => handler.apply(null, data.args));
+					}else if(data.exportState){
+						handleResult(() => exportStateHandler.apply(null, []));
+					}else if(data.importState){
+						handleResult(() => importStateHandler.apply(null, [data.state]));
 					}
-					return function(e){
-						var data = e.data;
-						if(data.commandName){
-							var handler = commandHandlers[data.commandName];
-							handleResult(() => handler.apply(null, data.args))
-						}else if(data.queryName){
-							console.log(`worker ${workerId} going to execute a query`);
-							var handler = queryHandlers[data.queryName];
-							handleResult(() => handler.apply(null, data.args));
-						}else if(data.exportState){
-							handleResult(() => exportStateHandler.apply(null, []));
-						}else if(data.importState){
-							handleResult(() => importStateHandler.apply(null, [data.state]));
-						}
-					};
-				})();
+				};
 			}, this.workerId, this.url);
 			this.worker.onmessage = function(e){
 				var data = e.data;
@@ -166,6 +165,7 @@ var CQRS = (function(){
 			this.queries = [];
 			this.url = url;
 			this.executingCommand = false;
+			this.copyingWorker = false;
 		}
 		async executeNext(){
 			if(this.executingCommand){
@@ -180,27 +180,22 @@ var CQRS = (function(){
 			if(availableWorkers.length === 0){
 				return;
 			}
-			if(availableWorkers.length < this.queries.length && this.workers.length < this.number){
+			if(availableWorkers.length < this.queries.length && this.workers.length < this.number && !this.copyingWorker){
 				var workerToCopy = availableWorkers.splice(0, 1)[0];
 				this.copyWorker(workerToCopy);
 			}
 			for(var availableWorker of availableWorkers){
 				this.dequeueAndExecuteQuery(availableWorker);
 			}
-			// var availableWorker = this.getAvailableWorker();
-			// while(!!availableWorker && this.queries.length > 0){
-			// 	this.dequeueAndExecuteQuery(availableWorker);
-			// 	availableWorker = this.getAvailableWorker();
-			// }
 		}
 		async copyWorker(worker){
-			console.log(`going to copy a worker`);
+			this.copyingWorker = true;
 			var state = await worker.getState();
-			//console.log(`got state from worker to copy: `, state);
 			var newWorker = new WorkerWrapper(this.url);
-			await newWorker.setState(state);
-			//console.log(`set state for new worker`);
+			var setStatePromise = newWorker.setState(state);
 			this.workers.push(newWorker);
+			await setStatePromise;
+			this.copyingWorker = false;
 			this.executeNext();
 		}
 		async dequeueAndExecuteQuery(worker){

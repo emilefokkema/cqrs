@@ -3,9 +3,17 @@
 	<script type="text/javascript" src="index.js"></script>
 	<script>
 	(async function(){
-		var state = await CQRS.create('sampleState.js', 2);
+		var state = await CQRS.create('sampleState.js', 5);
 		
-		state.setStep(2).catch((e) => {console.log(`didn't work (${e}). setting step to 4`); state.setStep(4)});
+		await (async function(){
+			try{
+				await state.setStep(2);
+			}catch(e){
+				console.log(`didn't work (${e}). setting step to 4`);
+				await state.setStep(4);
+			}
+		})();
+		//state.setStep(2).catch((e) => {console.log(`didn't work (${e}). setting step to 4`); state.setStep(4)});
 		//state.setStep(4);
 
 		var cancellationToken = new CQRS.CancellationToken();
@@ -13,10 +21,15 @@
 		state.getStep(2, cancellationToken);
 		cancellationToken.cancel();
 		var queries = [];
-		for(var i = 0; i < 10; i++){
+		var start = +new Date();
+		for(var i = 0; i < 100; i++){
 			queries.push(state.getStep(i))
 		}
-		console.log(`got result `, await Promise.all(queries));
+		var result = await Promise.all(queries)
+		var delay = +new Date() - start;
+		console.log(`got result after ${delay} ms:`, result);
+		var cumulativeDelay = result.map(s => s.delay).reduce((a, b) => a + b, 0);
+		console.log(`cumulative delay: ${cumulativeDelay}. ratio: ${delay / cumulativeDelay}`)
 	})()
 	</script>
 </body>
