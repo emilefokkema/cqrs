@@ -32,12 +32,12 @@ onQuery('getPixels', (tile) => {
 			array[arrayIndexRed + 3] = a;
 		}
 	}
-	return new Promise((res) => {
-		setTimeout(() => {
-			res(array.buffer);
-		}, 10);
-	})
-	//return array.buffer;
+	// return new Promise((res) => {
+	// 	setTimeout(() => {
+	// 		res(array.buffer);
+	// 	}, 10);
+	// })
+	return array.buffer;
 }, true);
 
 onQuery('getTiles', () => {

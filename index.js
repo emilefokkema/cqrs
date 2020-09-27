@@ -199,6 +199,7 @@ var CQRS = (function(){
 			this.executingCommand = false;
 			this.copyingWorker = false;
 			this.currentState = undefined;
+			this.currentStatePresent = false;
 		}
 		async executeNext(){
 			if(this.executingCommand){
@@ -222,7 +223,12 @@ var CQRS = (function(){
 			}
 		}
 		replaceWorker(worker){
-			console.log(`going to replace worker ${worker.workerId}`);
+			var index = this.workers.indexOf(worker);
+			if(index > -1){
+				this.workers.splice(index, 1);
+			}
+			worker.terminate();
+			//console.log(`going to replace worker ${worker.workerId}`);
 		}
 		async copyWorker(){
 			this.copyingWorker = true;
@@ -246,8 +252,14 @@ var CQRS = (function(){
 				return;
 			}
 			var worker = new WorkerWrapper(this.url);
-			this.currentState = await worker.getState();
-			console.log(`current state: `, this.currentState)
+			if(this.currentStatePresent){
+				await worker.setState(this.currentState);
+			}else{
+				this.currentState = await worker.getState();
+				this.currentStatePresent = true;
+			}
+			
+			//console.log(`current state: `, this.currentState)
 			this.workers.push(worker);
 		}
 		getAvailableWorkers(number){
@@ -293,7 +305,7 @@ var CQRS = (function(){
 			try{
 				await Promise.all(this.workers.map(w => w.executeCommand(new WorkerRequest(commandName, args))));
 				this.currentState = await this.workers[0].getState();
-				console.log(`current state: `, this.currentState)
+				//console.log(`current state: `, this.currentState)
 			}finally{
 				this.executingCommand = false;
 			}
